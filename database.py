@@ -2,16 +2,16 @@ import aiosqlite
 import pytz
 from datetime import datetime
 from typing import Optional, List, Tuple
-from config import SETTINGS, TIMEZONE
-
-TIMEZONE = pytz.timezone(SETTINGS.TIMEZONE_NAME)
-
+from config import SETTINGS, TIMEZONE, AUTHOR_SIG_PATTERN
+import re
 
 class DatabaseManager:
+    """Управляет единственным асинхронным подключением к aiosqlite."""
     _connection: Optional[aiosqlite.Connection] = None
 
     @classmethod
     async def get_connection(cls) -> aiosqlite.Connection:
+        """Получает или создает одно подключение к БД."""
         if cls._connection is None:
             cls._connection = await aiosqlite.connect(SETTINGS.DB_NAME, timeout=10)
             cls._connection.row_factory = aiosqlite.Row
@@ -19,12 +19,14 @@ class DatabaseManager:
 
     @classmethod
     async def close_connection(cls):
+        """Закрывает подключение."""
         if cls._connection:
             await cls._connection.close()
             cls._connection = None
 
     @classmethod
     async def init_db(cls):
+        """Создает таблицы, если их нет."""
         db = await cls.get_connection()
         await db.execute('''
             CREATE TABLE IF NOT EXISTS stats (
@@ -65,25 +67,22 @@ class DatabaseManager:
         ''')
         await db.commit()
 
-
+# Вспомогательные функции для работы со временем
 def _get_datetime_now_utc_str() -> str:
     return datetime.now(pytz.utc).isoformat()
 
-
 def _get_limit_date_str() -> str:
     return datetime.now(TIMEZONE).strftime("%Y-%m-%d")
-
 
 def _to_tz_datetime(iso_utc_str: str) -> datetime:
     dt_utc = datetime.fromisoformat(iso_utc_str).astimezone(pytz.utc)
     return dt_utc.astimezone(TIMEZONE)
 
-
+# Функции для бана/лимитов/статистики
 async def async_db_is_banned(user_id: int) -> bool:
     db = await DatabaseManager.get_connection()
     async with db.execute("SELECT 1 FROM banned_users WHERE user_id = ?", (user_id,)) as cursor:
         return await cursor.fetchone() is not None
-
 
 async def async_db_ban_user(user_id: int, moderator_id: int, reason: str = "Не указана"):
     now_utc_str = _get_datetime_now_utc_str()
@@ -94,16 +93,13 @@ async def async_db_ban_user(user_id: int, moderator_id: int, reason: str = "Не
     )
     await db.commit()
 
-
 async def async_db_unban_user(user_id: int):
     db = await DatabaseManager.get_connection()
     await db.execute("DELETE FROM banned_users WHERE user_id = ?", (user_id,))
     await db.commit()
 
-
 async def async_db_get_current_limit_count(user_id: int) -> int:
-    if user_id == SETTINGS.OWNER_ID: 
-        return 0
+    if user_id == SETTINGS.OWNER_ID: return 0
     today_str = _get_limit_date_str()
     db = await DatabaseManager.get_connection()
     async with db.execute("SELECT COALESCE(count, 0) FROM user_limits WHERE user_id = ? AND date_str = ?",
@@ -111,10 +107,8 @@ async def async_db_get_current_limit_count(user_id: int) -> int:
         result = await cursor.fetchone()
         return result[0] if result else 0
 
-
 async def async_db_increment_limit(user_id: int):
-    if user_id == SETTINGS.OWNER_ID: 
-        return
+    if user_id == SETTINGS.OWNER_ID: return
     today_str = _get_limit_date_str()
     db = await DatabaseManager.get_connection()
     await db.execute(
@@ -124,10 +118,8 @@ async def async_db_increment_limit(user_id: int):
     )
     await db.commit()
 
-
 async def async_db_decrement_limit(user_id: int):
-    if user_id == SETTINGS.OWNER_ID: 
-        return
+    if user_id == SETTINGS.OWNER_ID: return
     today_str = _get_limit_date_str()
     db = await DatabaseManager.get_connection()
     await db.execute(
@@ -136,7 +128,7 @@ async def async_db_decrement_limit(user_id: int):
     )
     await db.commit()
 
-
+# Функции PENDING POSTS/BROADCAST
 async def async_db_record_pending_post(message_id: int, user_id: int):
     submitted_at_utc_str = _get_datetime_now_utc_str()
     db = await DatabaseManager.get_connection()
@@ -146,7 +138,6 @@ async def async_db_record_pending_post(message_id: int, user_id: int):
     )
     await db.commit()
 
-
 async def async_db_add_broadcast_user(user_id: int):
     db = await DatabaseManager.get_connection()
     await db.execute(
@@ -155,12 +146,10 @@ async def async_db_add_broadcast_user(user_id: int):
     )
     await db.commit()
 
-
 async def async_db_get_all_broadcast_users() -> List[int]:
     db = await DatabaseManager.get_connection()
     async with db.execute("SELECT user_id FROM broadcast_users") as cursor:
         return [row[0] for row in await cursor.fetchall()]
-
 
 async def async_db_get_pending_post_data(message_id: int) -> Optional[Tuple[int, datetime]]:
     db = await DatabaseManager.get_connection()
@@ -174,12 +163,10 @@ async def async_db_get_pending_post_data(message_id: int) -> Optional[Tuple[int,
             return user_id, submitted_at_tz
         return None
 
-
 async def async_db_delete_pending_post(message_id: int):
     db = await DatabaseManager.get_connection()
     await db.execute("DELETE FROM pending_posts WHERE message_id = ?", (message_id,))
     await db.commit()
-
 
 async def async_db_add_stat(event_type: str, submitted_at_tz: Optional[datetime], message_id: Optional[int] = None):
     now_utc_str = _get_datetime_now_utc_str()
@@ -198,7 +185,6 @@ async def async_db_add_stat(event_type: str, submitted_at_tz: Optional[datetime]
         await db.execute("DELETE FROM pending_posts WHERE message_id = ?", (message_id,))
 
     await db.commit()
-
 
 async def async_db_get_stats_counts(period: str = 'all') -> Tuple[int, int]:
     db = await DatabaseManager.get_connection()
