@@ -1,10 +1,9 @@
 import logging
-import re
 import asyncio
-from datetime import datetime
+import re
 from typing import Dict, Any, Union
+from datetime import datetime
 
-import pytz
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ParseMode, ChatType
 from aiogram.filters import Command, CommandStart, StateFilter
@@ -13,7 +12,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, CallbackQuery, InputMediaPhoto
 from aiogram.exceptions import TelegramBadRequest, TelegramAPIError
 
-from config import SETTINGS, TIMEZONE
+from config import SETTINGS, TIMEZONE, AUTHOR_SIG_PATTERN
 from database import (
     async_db_is_banned, async_db_ban_user, async_db_unban_user,
     async_db_get_current_limit_count, async_db_increment_limit, async_db_decrement_limit,
@@ -26,8 +25,17 @@ from keyboards import (
     kb_moderation_main, kb_stats_options, kb_stats_back_only
 )
 
+# Логирование
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(SETTINGS.LOG_FILE, encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
 
-# Состояния FSM
+# FSM состояния
 class AdSubmission(StatesGroup):
     waiting_for_start_button = State()
     waiting_for_item_desc = State()
@@ -38,26 +46,18 @@ class AdSubmission(StatesGroup):
     waiting_for_edit_price = State()
     waiting_for_edit_contact = State()
 
-
 class Broadcast(StatesGroup):
     waiting_for_message = State()
     waiting_for_confirmation = State()
 
-
 class Stats(StatesGroup):
     initial = State()
-
-
-# Шаблон для удаления служебной информации
-AUTHOR_SIG_PATTERN = re.compile(r'\n+— ID Автора:.*?—\s*$', re.DOTALL)
-
 
 # Вспомогательные функции
 def escape_html(text: Optional[str]) -> str:
     if text is None:
         return ""
     return str(text).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-
 
 def format_ad_text(data: Dict[str, Any], parse_mode: ParseMode = ParseMode.HTML) -> str:
     description = escape_html(data.get('description', 'Описание не указано'))
@@ -77,13 +77,11 @@ def format_ad_text(data: Dict[str, Any], parse_mode: ParseMode = ParseMode.HTML)
             f"📞 **Контакт:** {contact}"
         )
 
-
 async def send_log(bot: Bot, message: str):
     try:
         await bot.send_message(SETTINGS.CHANNEL_LOG_ID, f"📋 **LOG:** {message}", parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
         logging.error(f"Failed to send log message to channel: {e}")
-
 
 async def safe_delete_message(bot: Bot, chat_id: int, message_id: Optional[int]):
     if message_id is None:
@@ -93,14 +91,12 @@ async def safe_delete_message(bot: Bot, chat_id: int, message_id: Optional[int])
     except TelegramBadRequest:
         pass
 
-
 async def delete_instruction_message(bot: Bot, chat_id: int, state: FSMContext):
     data = await state.get_data()
     message_id = data.get('instruction_message_id')
     await safe_delete_message(bot, chat_id, message_id)
     if message_id is not None:
         await state.update_data(instruction_message_id=None)
-
 
 async def delete_user_draft(bot: Bot, chat_id: int, state: FSMContext):
     data = await state.get_data()
@@ -109,8 +105,7 @@ async def delete_user_draft(bot: Bot, chat_id: int, state: FSMContext):
     if message_id is not None:
         await state.update_data(draft_message_id=None)
 
-
-# Хэндлеры пользователя
+# Хэндлеры: пользователь (START/CANCEL/SUBMISSION)
 async def cmd_cancel(entity: Union[Message, CallbackQuery], state: FSMContext):
     if isinstance(entity, CallbackQuery):
         chat_id = entity.message.chat.id
@@ -136,80 +131,8 @@ async def cmd_cancel(entity: Union[Message, CallbackQuery], state: FSMContext):
     else:
         await entity.answer(response_text, reply_markup=types.ReplyKeyboardRemove())
 
-
 async def cmd_cancel_callback_handler(callback: CallbackQuery, state: FSMContext):
     await cmd_cancel(callback, state)
-
-
-async def command_start(message: Message, state: FSMContext):
-    user_id = message.from_user.id
-
-    await async_db_add_broadcast_user(user_id)
-
-    if await async_db_is_banned(user_id):
-        await message.answer(
-            "🚫 <b>Доступ запрещен.</b>\n\nВы заблокированы в этом боте.",
-            reply_markup=types.ReplyKeyboardRemove()
-        )
-        await state.clear()
-        return
-
-    await delete_instruction_message(message.bot, message.chat.id, state)
-    await delete_user_draft(message.bot, message.chat.id, state)
-
-    await state.clear()
-    await state.set_state(AdSubmission.waiting_for_start_button)
-
-    is_owner = user_id == SETTINGS.OWNER_ID
-    current_count = await async_db_get_current_limit_count(user_id)
-
-    if is_owner:
-        limit_info = "<b>Безлимит</b> (Владелец)"
-    else:
-        remaining = max(0, SETTINGS.MAX_POSTS_PER_DAY - current_count)
-        limit_info = f"<b>Лимит:</b> {SETTINGS.MAX_POSTS_PER_DAY} <b>постов в сутки.</b> <b>Осталось:</b> {remaining}"
-
-    welcome_text = (
-        f"<b>Здравствуйте, {escape_html(message.from_user.full_name)}!</b>\n\n"
-        f"Я бот для сбора объявлений. Вы можете предложить пост для публикации в нашем канале.\n\n"
-        f"💡 <b>Важно:</b>\n"
-        f"• Объявления проходят модерацию\n"
-        f"• {limit_info}\n"
-        f"• Придерживайтесь делового стиля общения"
-    )
-
-    await message.answer(welcome_text, reply_markup=kb_start_submit())
-
-
-async def callback_start_submit(callback: CallbackQuery, state: FSMContext):
-    user_id = callback.from_user.id
-    await callback.answer()
-
-    current_count = await async_db_get_current_limit_count(user_id)
-    if user_id != SETTINGS.OWNER_ID and current_count >= SETTINGS.MAX_POSTS_PER_DAY:
-        await callback.message.edit_text(
-            f"🚫 <b>Превышен лимит постов</b>\n\n"
-            f"На сегодня вы уже использовали {SETTINGS.MAX_POSTS_PER_DAY} постов.\n"
-            f"Попробуйте завтра!",
-            reply_markup=None
-        )
-        await state.clear()
-        return
-
-    await state.set_state(AdSubmission.waiting_for_item_desc)
-
-    step1_text = (
-        "📝 <b>Шаг 1 из 3: Описание и фото</b>\n\n"
-        "Пришлите <b>одно фото</b> (по желанию) и подробное описание вашего товара.\n\n"
-        "📌 <b>Требования:</b>\n"
-        "• Описание должно быть полным и понятным\n"
-        "• Минимум 10 символов\n"
-        "• Укажите все важные детали"
-    )
-
-    instruction_message = await callback.message.edit_text(step1_text, reply_markup=kb_ad_submission_cancel())
-    await state.update_data(instruction_message_id=instruction_message.message_id)
-
 
 async def process_item_description(message: Message, state: FSMContext, bot: Bot):
     await delete_instruction_message(bot, message.chat.id, state)
@@ -238,7 +161,6 @@ async def process_item_description(message: Message, state: FSMContext, bot: Bot
     )
     await state.update_data(instruction_message_id=instruction_message.message_id)
 
-
 async def process_price(message: Message, state: FSMContext, bot: Bot):
     await delete_instruction_message(bot, message.chat.id, state)
     await safe_delete_message(bot, message.chat.id, message.message_id)
@@ -262,7 +184,6 @@ async def process_price(message: Message, state: FSMContext, bot: Bot):
         reply_markup=kb_ad_submission_cancel()
     )
     await state.update_data(instruction_message_id=instruction_message.message_id)
-
 
 async def process_contact(message: Message, state: FSMContext, bot: Bot):
     await delete_instruction_message(bot, message.chat.id, state)
@@ -301,7 +222,6 @@ async def process_contact(message: Message, state: FSMContext, bot: Bot):
             reply_markup=kb_ad_submission_edit()
         )
     await state.update_data(draft_message_id=preview_message.message_id)
-
 
 async def process_single_edit(message: Message, state: FSMContext, bot: Bot):
     await delete_instruction_message(bot, message.chat.id, state)
@@ -405,6 +325,73 @@ async def process_single_edit(message: Message, state: FSMContext, bot: Bot):
     await message.answer("✅ <b>Редактирование завершено.</b>\n\nПроверьте обновленный черновик выше.",
                          reply_markup=types.ReplyKeyboardRemove())
 
+async def command_start(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+
+    await async_db_add_broadcast_user(user_id)
+
+    if await async_db_is_banned(user_id):
+        await message.answer(
+            "🚫 <b>Доступ запрещен.</b>\n\nВы заблокированы в этом боте.",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        await state.clear()
+        return
+
+    await delete_instruction_message(message.bot, message.chat.id, state)
+    await delete_user_draft(message.bot, message.chat.id, state)
+
+    await state.clear()
+    await state.set_state(AdSubmission.waiting_for_start_button)
+
+    is_owner = user_id == SETTINGS.OWNER_ID
+    current_count = await async_db_get_current_limit_count(user_id)
+
+    if is_owner:
+        limit_info = "<b>Безлимит</b> (Владелец)"
+    else:
+        remaining = max(0, SETTINGS.MAX_POSTS_PER_DAY - current_count)
+        limit_info = f"<b>Лимит:</b> {SETTINGS.MAX_POSTS_PER_DAY} <b>постов в сутки.</b> <b>Осталось:</b> {remaining}"
+
+    welcome_text = (
+        f"<b>Здравствуйте, {escape_html(message.from_user.full_name)}!</b>\n\n"
+        f"Я бот для сбора объявлений. Вы можете предложить пост для публикации в нашем канале.\n\n"
+        f"💡 <b>Важно:</b>\n"
+        f"• Объявления проходят модерацию\n"
+        f"• {limit_info}\n"
+        f"• Придерживайтесь делового стиля общения"
+    )
+
+    await message.answer(welcome_text, reply_markup=kb_start_submit())
+
+async def callback_start_submit(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    await callback.answer()
+
+    current_count = await async_db_get_current_limit_count(user_id)
+    if user_id != SETTINGS.OWNER_ID and current_count >= SETTINGS.MAX_POSTS_PER_DAY:
+        await callback.message.edit_text(
+            f"🚫 <b>Превышен лимит постов</b>\n\n"
+            f"На сегодня вы уже использовали {SETTINGS.MAX_POSTS_PER_DAY} постов.\n"
+            f"Попробуйте завтра!",
+            reply_markup=None
+        )
+        await state.clear()
+        return
+
+    await state.set_state(AdSubmission.waiting_for_item_desc)
+
+    step1_text = (
+        "📝 <b>Шаг 1 из 3: Описание и фото</b>\n\n"
+        "Пришлите <b>одно фото</b> (по желанию) и подробное описание вашего товара.\n\n"
+        "📌 <b>Требования:</b>\n"
+        "• Описание должно быть полным и понятным\n"
+        "• Минимум 10 символов\n"
+        "• Укажите все важные детали"
+    )
+
+    instruction_message = await callback.message.edit_text(step1_text, reply_markup=kb_ad_submission_cancel())
+    await state.update_data(instruction_message_id=instruction_message.message_id)
 
 async def callback_final_send(callback: CallbackQuery, state: FSMContext, bot: Bot):
     data = await state.get_data()
@@ -486,51 +473,9 @@ async def callback_final_send(callback: CallbackQuery, state: FSMContext, bot: B
 
         await state.clear()
 
-
-# Хендлеры редактирования
-async def callback_edit_desc(callback: CallbackQuery, state: FSMContext):
-    await callback.answer("✏️ Редактирование описания...")
-    await delete_instruction_message(callback.bot, callback.message.chat.id, state)
-
-    await state.set_state(AdSubmission.waiting_for_edit_desc)
-    instruction_message = await callback.message.answer(
-        "📝 <b>Редактирование описания</b>\n\n"
-        "Введите новое описание (можно с фото).",
-        reply_markup=kb_ad_submission_cancel()
-    )
-    await state.update_data(instruction_message_id=instruction_message.message_id)
-
-
-async def callback_edit_price(callback: CallbackQuery, state: FSMContext):
-    await callback.answer("💰 Редактирование цены...")
-    await delete_instruction_message(callback.bot, callback.message.chat.id, state)
-
-    await state.set_state(AdSubmission.waiting_for_edit_price)
-    instruction_message = await callback.message.answer(
-        "💰 <b>Редактирование цены</b>\n\n"
-        "Введите новую цену.",
-        reply_markup=kb_ad_submission_cancel()
-    )
-    await state.update_data(instruction_message_id=instruction_message.message_id)
-
-
-async def callback_edit_contact(callback: CallbackQuery, state: FSMContext):
-    await callback.answer("📞 Редактирование контакта...")
-    await delete_instruction_message(callback.bot, callback.message.chat.id, state)
-
-    await state.set_state(AdSubmission.waiting_for_edit_contact)
-    instruction_message = await callback.message.answer(
-        "📞 <b>Редактирование контакта</b>\n\n"
-        "Введите новый контакт для связи.",
-        reply_markup=kb_ad_submission_cancel()
-    )
-    await state.update_data(instruction_message_id=instruction_message.message_id)
-
-
-# Хендлеры владельца/модератора
+# Хэндлеры владельца/модератора
 async def cmd_help_owner(message: Message):
-    if message.from_user.id != SETTINGS.OWNER_ID: 
-        return
+    if message.from_user.id != SETTINGS.OWNER_ID: return
     help_text = (
         "🛠️ <b>Меню Владельца</b>\n\n"
         "<code>/stats</code> - <b>Статистика</b>\n"
@@ -540,10 +485,8 @@ async def cmd_help_owner(message: Message):
     )
     await message.answer(help_text)
 
-
 async def cmd_ban(message: Message):
-    if message.from_user.id != SETTINGS.OWNER_ID: 
-        return
+    if message.from_user.id != SETTINGS.OWNER_ID: return
 
     parts = message.text.split(maxsplit=2)
     if len(parts) < 2 or not parts[1].isdigit():
@@ -567,10 +510,8 @@ async def cmd_ban(message: Message):
     )
     await send_log(message.bot, f"Пользователь `{user_id_to_ban}` заблокирован. Причина: `{reason}`")
 
-
 async def cmd_unban(message: Message):
-    if message.from_user.id != SETTINGS.OWNER_ID: 
-        return
+    if message.from_user.id != SETTINGS.OWNER_ID: return
 
     parts = message.text.split()
     if len(parts) < 2 or not parts[1].isdigit():
@@ -589,10 +530,8 @@ async def cmd_unban(message: Message):
     else:
         await message.answer(f"ℹ️ <b>Пользователь <code>{user_id_to_unban}</code> не был забанен.</b>")
 
-
 async def cmd_broadcast(message: Message, state: FSMContext):
-    if message.from_user.id != SETTINGS.OWNER_ID: 
-        return
+    if message.from_user.id != SETTINGS.OWNER_ID: return
     await state.set_state(Broadcast.waiting_for_message)
     await message.answer(
         "📢 <b>Рассылка</b>\n\n"
@@ -600,10 +539,8 @@ async def cmd_broadcast(message: Message, state: FSMContext):
         "❌ Используйте /cancel для отмены."
     )
 
-
 async def process_broadcast_message(message: Message, state: FSMContext):
-    if message.from_user.id != SETTINGS.OWNER_ID: 
-        return
+    if message.from_user.id != SETTINGS.OWNER_ID: return
 
     await state.update_data(
         broadcast_chat_id=message.chat.id,
@@ -611,7 +548,6 @@ async def process_broadcast_message(message: Message, state: FSMContext):
     )
     await state.set_state(Broadcast.waiting_for_confirmation)
 
-    from aiogram.utils.keyboard import InlineKeyboardBuilder
     builder = InlineKeyboardBuilder()
     builder.button(text="✅ Подтвердить", callback_data="bc_confirm")
 
@@ -621,10 +557,8 @@ async def process_broadcast_message(message: Message, state: FSMContext):
         reply_markup=builder.as_markup()
     )
 
-
 async def callback_broadcast_confirm(callback: CallbackQuery, state: FSMContext, bot: Bot):
-    if callback.from_user.id != SETTINGS.OWNER_ID: 
-        return
+    if callback.from_user.id != SETTINGS.OWNER_ID: return
 
     await callback.answer("📤 Начинаем рассылку...")
 
@@ -675,6 +609,42 @@ async def callback_broadcast_confirm(callback: CallbackQuery, state: FSMContext,
     await send_log(bot, f"Рассылка завершена. Успешно: {success_count}, Ошибка: {fail_count}.")
     await state.clear()
 
+# Хендлеры редактирования
+async def callback_edit_desc(callback: CallbackQuery, state: FSMContext):
+    await callback.answer("✏️ Редактирование описания...")
+    await delete_instruction_message(callback.bot, callback.message.chat.id, state)
+
+    await state.set_state(AdSubmission.waiting_for_edit_desc)
+    instruction_message = await callback.message.answer(
+        "📝 <b>Редактирование описания</b>\n\n"
+        "Введите новое описание (можно с фото).",
+        reply_markup=kb_ad_submission_cancel()
+    )
+    await state.update_data(instruction_message_id=instruction_message.message_id)
+
+async def callback_edit_price(callback: CallbackQuery, state: FSMContext):
+    await callback.answer("💰 Редактирование цены...")
+    await delete_instruction_message(callback.bot, callback.message.chat.id, state)
+
+    await state.set_state(AdSubmission.waiting_for_edit_price)
+    instruction_message = await callback.message.answer(
+        "💰 <b>Редактирование цены</b>\n\n"
+        "Введите новую цену.",
+        reply_markup=kb_ad_submission_cancel()
+    )
+    await state.update_data(instruction_message_id=instruction_message.message_id)
+
+async def callback_edit_contact(callback: CallbackQuery, state: FSMContext):
+    await callback.answer("📞 Редактирование контакта...")
+    await delete_instruction_message(callback.bot, callback.message.chat.id, state)
+
+    await state.set_state(AdSubmission.waiting_for_edit_contact)
+    instruction_message = await callback.message.answer(
+        "📞 <b>Редактирование контакта</b>\n\n"
+        "Введите новый контакт для связи.",
+        reply_markup=kb_ad_submission_cancel()
+    )
+    await state.update_data(instruction_message_id=instruction_message.message_id)
 
 # Хендлеры статистики
 async def async_get_stats_text(period: str) -> str:
@@ -698,10 +668,8 @@ async def async_get_stats_text(period: str) -> str:
     )
     return stats_text
 
-
 async def cmd_stats(message: Message, state: FSMContext):
-    if message.from_user.id != SETTINGS.OWNER_ID: 
-        return
+    if message.from_user.id != SETTINGS.OWNER_ID: return
 
     await state.set_state(Stats.initial)
 
@@ -711,28 +679,22 @@ async def cmd_stats(message: Message, state: FSMContext):
     )
     await message.answer(menu_text, reply_markup=kb_stats_options())
 
-
 async def callback_stats_today(callback: CallbackQuery, state: FSMContext):
-    if callback.from_user.id != SETTINGS.OWNER_ID: 
-        return
+    if callback.from_user.id != SETTINGS.OWNER_ID: return
     await callback.answer("📊 Статистика за сегодня...")
 
     stats_text = await async_get_stats_text('today')
     await callback.message.edit_text(stats_text, reply_markup=kb_stats_back_only())
 
-
 async def callback_stats_all(callback: CallbackQuery, state: FSMContext):
-    if callback.from_user.id != SETTINGS.OWNER_ID: 
-        return
+    if callback.from_user.id != SETTINGS.OWNER_ID: return
     await callback.answer("📈 Общая статистика...")
 
     stats_text = await async_get_stats_text('all')
     await callback.message.edit_text(stats_text, reply_markup=kb_stats_back_only())
 
-
 async def callback_stats_show_menu(callback: CallbackQuery, state: FSMContext):
-    if callback.from_user.id != SETTINGS.OWNER_ID: 
-        return
+    if callback.from_user.id != SETTINGS.OWNER_ID: return
     await callback.answer("🔙 Возврат в меню статистики...")
 
     menu_text = (
@@ -741,10 +703,8 @@ async def callback_stats_show_menu(callback: CallbackQuery, state: FSMContext):
     )
     await callback.message.edit_text(menu_text, reply_markup=kb_stats_options())
 
-
 async def callback_stats_back(callback: CallbackQuery, state: FSMContext):
-    if callback.from_user.id != SETTINGS.OWNER_ID: 
-        return
+    if callback.from_user.id != SETTINGS.OWNER_ID: return
     await callback.answer("🔙 Возврат в главное меню...")
 
     try:
@@ -754,7 +714,6 @@ async def callback_stats_back(callback: CallbackQuery, state: FSMContext):
 
     await state.clear()
     await command_start(callback.message, state)
-
 
 # Хендлеры модерации
 async def callback_moderation(callback: CallbackQuery, bot: Bot):
@@ -796,7 +755,7 @@ async def callback_moderation(callback: CallbackQuery, bot: Bot):
         original_content = callback.message.caption if callback.message.caption else callback.message.text
 
         if is_published:
-            final_content = AUTHOR_SIG_PATTERN.sub('', original_content).strip()
+            final_content = re.sub(AUTHOR_SIG_PATTERN, '', original_content, flags=re.DOTALL).strip()
 
             if callback.message.photo:
                 await bot.send_photo(
