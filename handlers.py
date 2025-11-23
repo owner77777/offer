@@ -1,7 +1,7 @@
 import logging
 import asyncio
 import re
-from typing import Dict, Any, Union
+from typing import Dict, Any, Union, Optional  # Добавлен Optional
 from datetime import datetime
 
 from aiogram import Bot, Dispatcher, types, F
@@ -11,6 +11,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, CallbackQuery, InputMediaPhoto
 from aiogram.exceptions import TelegramBadRequest, TelegramAPIError
+from aiogram.utils.keyboard import InlineKeyboardBuilder  # Добавлен импорт
 
 from config import SETTINGS, TIMEZONE, AUTHOR_SIG_PATTERN
 from database import (
