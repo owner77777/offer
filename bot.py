@@ -1,5 +1,7 @@
 import asyncio
 import logging
+from aiohttp import web
+import threading
 from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ParseMode, ChatType
 from aiogram.filters import Command, CommandStart, StateFilter
@@ -40,6 +42,9 @@ from handlers import (
 )
 
 async def main():
+    # Запускаем веб-сервер в отдельном потоке
+    start_web_server()
+    
     await DatabaseManager.init_db()
 
     default_props = DefaultBotProperties(parse_mode=ParseMode.HTML)
@@ -122,8 +127,24 @@ async def main():
     finally:
         await DatabaseManager.close_connection()
 
-if __name__ == "__main__":
+# Веб-сервер для Render
+async def handle_health_check(request):
+    return web.Response(text="Bot is running")
+
+def run_web_server():
+    app = web.Application()
+    app.router.add_get('/', handle_health_check)
+    app.router.add_get('/health', handle_health_check)
+    
+    port = int(os.environ.get("PORT", 10000))
+    web.run_app(app, host='0.0.0.0', port=port)
+
+def start_web_server():
+    thread = threading.Thread(target=run_web_server, daemon=True)
+    thread.start()
+
+ print("🤖 Бот запущен...")
     try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("🛑 Бот остановлен.")
+        await dp.start_polling(bot)
+    finally:
+        await DatabaseManager.close_connection()
