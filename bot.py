@@ -4,48 +4,41 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ParseMode, ChatType
 from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.client.default import DefaultBotProperties
-
 from config import SETTINGS
 from database import DatabaseManager
 from handlers import (
-    # Основные команды и отмена
     command_start, cmd_cancel, cmd_cancel_callback_handler,
-    
-    # Команды владельца
-    cmd_help_owner, cmd_stats, cmd_ban, cmd_unban,
-    
-    # Хендлеры рассылки
-    cmd_broadcast, process_broadcast_message, callback_broadcast_confirm,
-    
-    # Шаги FSM: Подача
-    process_item_description, process_price, process_contact,
-    
-    # Редактирование
-    process_single_edit,
-    
-    # Callbacks
+    process_item_description, process_price, process_contact, process_single_edit,
     callback_start_submit, callback_final_send,
-    
-    # Хендлеры редактирования
     callback_edit_desc, callback_edit_price, callback_edit_contact,
-    
-    # Хендлеры статистики
-    callback_stats_today, callback_stats_all, callback_stats_back, callback_stats_show_menu,
-    
-    # Хендлер модерации
-    callback_moderation
-)
-from handlers import (
+    cmd_help_owner, cmd_ban, cmd_unban, cmd_stats,
+    cmd_broadcast, process_broadcast_message, callback_broadcast_confirm,
+    callback_stats_today, callback_stats_all, callback_stats_show_menu, callback_stats_back,
+    callback_moderation,
     AdSubmission, Broadcast, Stats
 )
 
+
 async def main():
+    # Инициализация базы данных
     await DatabaseManager.init_db()
 
+    # Настройка логирования
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(SETTINGS.LOG_FILE, encoding='utf-8'),
+            logging.StreamHandler()
+        ]
+    )
+
+    # Создание бота и диспетчера
     default_props = DefaultBotProperties(parse_mode=ParseMode.HTML)
     bot = Bot(SETTINGS.BOT_TOKEN, default=default_props)
     dp = Dispatcher()
 
+    # Регистрация хэндлеров
     # Основные команды и отмена
     dp.message.register(command_start, CommandStart(), F.chat.type.in_({ChatType.PRIVATE}))
     dp.message.register(cmd_cancel, Command("cancel"), F.chat.type.in_({ChatType.PRIVATE}))
@@ -121,6 +114,7 @@ async def main():
         await dp.start_polling(bot)
     finally:
         await DatabaseManager.close_connection()
+
 
 if __name__ == "__main__":
     try:
