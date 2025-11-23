@@ -41,6 +41,22 @@ from handlers import (
     AdSubmission, Broadcast, Stats
 )
 
+# Веб-сервер для Render
+async def handle_health_check(request):
+    return web.Response(text="Bot is running")
+
+def run_web_server():
+    app = web.Application()
+    app.router.add_get('/', handle_health_check)
+    app.router.add_get('/health', handle_health_check)
+    
+    port = int(os.environ.get("PORT", 10000))
+    web.run_app(app, host='0.0.0.0', port=port)
+
+def start_web_server():
+    thread = threading.Thread(target=run_web_server, daemon=True)
+    thread.start()
+
 async def main():
     # Запускаем веб-сервер в отдельном потоке
     start_web_server()
@@ -127,24 +143,8 @@ async def main():
     finally:
         await DatabaseManager.close_connection()
 
-# Веб-сервер для Render
-async def handle_health_check(request):
-    return web.Response(text="Bot is running")
-
-def run_web_server():
-    app = web.Application()
-    app.router.add_get('/', handle_health_check)
-    app.router.add_get('/health', handle_health_check)
-    
-    port = int(os.environ.get("PORT", 10000))
-    web.run_app(app, host='0.0.0.0', port=port)
-
-def start_web_server():
-    thread = threading.Thread(target=run_web_server, daemon=True)
-    thread.start()
-
- print("🤖 Бот запущен...")
+if __name__ == "__main__":
     try:
-        await dp.start_polling(bot)
-    finally:
-        await DatabaseManager.close_connection()
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("🛑 Бот остановлен.")
