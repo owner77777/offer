@@ -1,6 +1,7 @@
-import pytz
+import os
 from pydantic import BaseModel
 from typing import Union
+
 
 class Config(BaseModel):
     BOT_TOKEN: str = "8346884521:AAGvOZdAJA4O3ohHzB2lFI5oTZnz3lWyxLY"
@@ -12,9 +13,7 @@ class Config(BaseModel):
     TIMEZONE_NAME: str = "Europe/Moscow"
     DB_NAME: str = "bot_data.db"
     LOG_FILE: str = "bot_log.log"
+    PORT: int = int(os.getenv("PORT", 8080))  # Для Render
+
 
 SETTINGS = Config()
-TIMEZONE = pytz.timezone(SETTINGS.TIMEZONE_NAME)
-
-# Шаблон для удаления служебной информации
-AUTHOR_SIG_PATTERN = r'\n+— ID Автора:.*?—\s*$'
