@@ -1,9 +1,8 @@
 import aiosqlite
 import pytz
 from datetime import datetime
-from typing import Optional, List, Tuple
-from config import SETTINGS, TIMEZONE, AUTHOR_SIG_PATTERN
-import re
+from typing import Optional, Tuple, List
+from config import SETTINGS, TIMEZONE
 
 class DatabaseManager:
     """Управляет единственным асинхронным подключением к aiosqlite."""
@@ -11,7 +10,6 @@ class DatabaseManager:
 
     @classmethod
     async def get_connection(cls) -> aiosqlite.Connection:
-        """Получает или создает одно подключение к БД."""
         if cls._connection is None:
             cls._connection = await aiosqlite.connect(SETTINGS.DB_NAME, timeout=10)
             cls._connection.row_factory = aiosqlite.Row
@@ -19,14 +17,12 @@ class DatabaseManager:
 
     @classmethod
     async def close_connection(cls):
-        """Закрывает подключение."""
         if cls._connection:
             await cls._connection.close()
             cls._connection = None
 
     @classmethod
     async def init_db(cls):
-        """Создает таблицы, если их нет."""
         db = await cls.get_connection()
         await db.execute('''
             CREATE TABLE IF NOT EXISTS stats (
@@ -67,7 +63,8 @@ class DatabaseManager:
         ''')
         await db.commit()
 
-# Вспомогательные функции для работы со временем
+# --- Вспомогательные функции ---
+
 def _get_datetime_now_utc_str() -> str:
     return datetime.now(pytz.utc).isoformat()
 
@@ -78,7 +75,8 @@ def _to_tz_datetime(iso_utc_str: str) -> datetime:
     dt_utc = datetime.fromisoformat(iso_utc_str).astimezone(pytz.utc)
     return dt_utc.astimezone(TIMEZONE)
 
-# Функции для бана/лимитов/статистики
+# --- Функции запросов ---
+
 async def async_db_is_banned(user_id: int) -> bool:
     db = await DatabaseManager.get_connection()
     async with db.execute("SELECT 1 FROM banned_users WHERE user_id = ?", (user_id,)) as cursor:
@@ -128,7 +126,6 @@ async def async_db_decrement_limit(user_id: int):
     )
     await db.commit()
 
-# Функции PENDING POSTS/BROADCAST
 async def async_db_record_pending_post(message_id: int, user_id: int):
     submitted_at_utc_str = _get_datetime_now_utc_str()
     db = await DatabaseManager.get_connection()
@@ -163,34 +160,24 @@ async def async_db_get_pending_post_data(message_id: int) -> Optional[Tuple[int,
             return user_id, submitted_at_tz
         return None
 
-async def async_db_delete_pending_post(message_id: int):
-    db = await DatabaseManager.get_connection()
-    await db.execute("DELETE FROM pending_posts WHERE message_id = ?", (message_id,))
-    await db.commit()
-
 async def async_db_add_stat(event_type: str, submitted_at_tz: Optional[datetime], message_id: Optional[int] = None):
     now_utc_str = _get_datetime_now_utc_str()
     now_tz = datetime.now(TIMEZONE)
     moderated_date_str = now_tz.strftime("%Y-%m-%d")
 
     submitted_utc_str = submitted_at_tz.astimezone(pytz.utc).isoformat() if submitted_at_tz else now_utc_str
-
     db = await DatabaseManager.get_connection()
-
     await db.execute(
         "INSERT INTO stats (event_type, created_at, moderated_at, moderated_date_str) VALUES (?, ?, ?, ?)",
         (event_type, submitted_utc_str, now_utc_str, moderated_date_str))
 
     if message_id:
         await db.execute("DELETE FROM pending_posts WHERE message_id = ?", (message_id,))
-
     await db.commit()
 
 async def async_db_get_stats_counts(period: str = 'all') -> Tuple[int, int]:
     db = await DatabaseManager.get_connection()
-
     params = []
-
     if period == 'today':
         today_str = _get_limit_date_str()
         condition = "WHERE moderated_date_str = ?"
