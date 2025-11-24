@@ -1,8 +1,12 @@
+import logging
+import re
 import pytz
 from pydantic import BaseModel
 from typing import Union
 
+# --- КОНФИГУРАЦИЯ ---
 class Config(BaseModel):
+    # Лучше брать из переменных окружения, но оставил ваши значения
     BOT_TOKEN: str = "8346884521:AAGvOZdAJA4O3ohHzB2lFI5oTZnz3lWyxLY"
     OWNER_ID: int = 6493670021
     CHANNEL_PREDLOZHKA_ID: Union[int, str] = -1003287891557
@@ -17,4 +21,14 @@ SETTINGS = Config()
 TIMEZONE = pytz.timezone(SETTINGS.TIMEZONE_NAME)
 
 # Шаблон для удаления служебной информации
-AUTHOR_SIG_PATTERN = r'\n+— ID Автора:.*?—\s*$'
+AUTHOR_SIG_PATTERN = re.compile(r'\n+— ID Автора:.*?—\s*$', re.DOTALL)
+
+# Логирование
+def setup_logging():
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.StreamHandler() # Для Render важно выводить в консоль
+        ]
+    )
