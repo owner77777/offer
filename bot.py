@@ -1,7 +1,10 @@
+# bot.py
+
 import asyncio
 import logging
 import re
 import os
+import sys
 from datetime import datetime
 import pytz
 from typing import Optional, Dict, Any, Tuple, List, Union
@@ -17,23 +20,14 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramBadRequest, TelegramAPIError
 from aiogram.types import Message, CallbackQuery, InputMediaPhoto, InputMedia
-from pydantic import BaseModel
+
+# Импорт настроек
+from config import SETTINGS, RENDER_PORT
+
+# ! ВАЖНО: Добавляем aiohttp для заглушки Web-сервера Render
+from aiohttp import web 
 
 
-# --- КОНФИГУРАЦИЯ ---
-class Config(BaseModel):
-    BOT_TOKEN: str = os.getenv("BOT_TOKEN", "8346884521:AAGvOZdAJA4O3ohHzB2lFI5oTZnz3lWyxLY")
-    OWNER_ID: int = 6493670021
-    CHANNEL_PREDLOZHKA_ID: Union[int, str] = -1003287891557
-    CHANNEL_FINAL_ID: Union[int, str] = -1003479497567
-    CHANNEL_LOG_ID: Union[int, str] = -1003494833745
-    MAX_POSTS_PER_DAY: int = 5
-    TIMEZONE_NAME: str = "Europe/Moscow"
-    DB_NAME: str = "bot_data.db"
-    LOG_FILE: str = "bot_log.log"
-
-
-SETTINGS = Config()
 TIMEZONE = pytz.timezone(SETTINGS.TIMEZONE_NAME)
 
 # Логирование
@@ -42,7 +36,7 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler(SETTINGS.LOG_FILE, encoding='utf-8'),
-        logging.StreamHandler()
+        logging.StreamHandler(sys.stdout) # Используем sys.stdout для логов Render
     ]
 )
 
@@ -1204,15 +1198,27 @@ async def callback_moderation(callback: CallbackQuery, bot: Bot):
         except Exception:
             pass
 
+# --- ГЛАВНАЯ ФУНКЦИЯ ---
 
-# --- MAIN ---
+# Определяем простой обработчик для Web-сервера
+async def render_health_check(request):
+    """Пустой обработчик, чтобы Render видел, что сервер запущен."""
+    return web.Response(text="Bot is running (polling mode).")
+
+
+async def bot_start(dp: Dispatcher, bot: Bot):
+    """Задача для запуска самого бота (Polling)."""
+    await DatabaseManager.init_db()
+    logging.info("🤖 База данных инициализирована.")
+    await dp.start_polling(bot)
+
 
 async def main():
-    await DatabaseManager.init_db()
-
     default_props = DefaultBotProperties(parse_mode=ParseMode.HTML)
     bot = Bot(SETTINGS.BOT_TOKEN, default=default_props)
     dp = Dispatcher()
+
+    # --- РЕГИСТРАЦИЯ ХЕНДЛЕРОВ ---
 
     # Основные команды и отмена
     dp.message.register(command_start, CommandStart(), F.chat.type.in_({ChatType.PRIVATE}))
@@ -1284,31 +1290,44 @@ async def main():
     # Хендлер модерации
     dp.callback_query.register(callback_moderation, F.data.startswith("mod_"), F.from_user.id == SETTINGS.OWNER_ID)
 
-    print("🤖 Бот запущен...")
+    # --- ЗАПУСК БОТА И WEB-СЕРВЕРА ---
+
+    # 1. Запускаем polling бота в фоновом режиме
+    bot_task = asyncio.create_task(bot_start(dp, bot))
+    
+    # 2. Создаем и запускаем Web-сервер-заглушку
+    app = web.Application()
+    app.router.add_get("/", render_health_check)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    
+    # Render предоставляет порт через переменную окружения PORT, если не указано, берем из config.py
+    port = int(os.environ.get('PORT', RENDER_PORT))
+    
+    site = web.TCPSite(runner, '0.0.0.0', port)
+
+    logging.info(f"🤖 Бот запущен (Polling).")
+    logging.info(f"🌐 Запуск Web-сервера для Render на 0.0.0.0:{port}")
+    
     try:
-        await dp.start_polling(bot)
+        # Запускаем Web-сервер
+        await site.start()
+        # Ожидаем завершения задачи бота (которая не должна завершиться)
+        await bot_task 
+    except asyncio.CancelledError:
+        logging.info("🤖 Бот остановлен.")
     finally:
-        await DatabaseManager.close_connection()  # Закрываем подключение при остановке
+        await DatabaseManager.close_connection()
+        # Закрываем Web-сервер и runner
+        await runner.cleanup()
 
 
 if __name__ == "__main__":
-    # Добавляем простой HTTP сервер для проверки здоровья (health check)
-    from aiohttp import web
-    import threading
-    
-    def run_health_check():
-        async def health_check(request):
-            return web.Response(text='OK')
-        
-        app = web.Application()
-        app.router.add_get('/health', health_check)
-        web.run_app(app, host='0.0.0.0', port=8080)
-    
-    # Запускаем health check в отдельном потоке
-    health_thread = threading.Thread(target=run_health_check, daemon=True)
-    health_thread.start()
-    
     try:
+        # Используем loop.run_until_complete для запуска асинхронной main
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("🛑 Бот остановлен.")
+        logging.info("🛑 Бот остановлен.")
+    except Exception as e:
+        logging.error(f"Fatal error in main execution: {e}")
